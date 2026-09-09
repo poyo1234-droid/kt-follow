@@ -1,0 +1,15 @@
+# ZOZO からダウンロードした元データ・加工済みデータ（巨大なため追跡しない）
+0907フォローデータ提出用/
+0907フォローデータ提出用.zip
+
+# Excel の一時ファイル・ロックファイル
+~$*
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+
+# Windows
+Thumbs.db
+desktop.ini
