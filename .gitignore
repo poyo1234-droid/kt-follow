@@ -13,3 +13,7 @@ __pycache__/
 # Windows
 Thumbs.db
 desktop.ini
+
+# kintone から取得した生データ（config.js のトークン入り）・誤出力の退避先
+JS/kintone/kintone_*_js_*.json
+JS/_to_delete_*/

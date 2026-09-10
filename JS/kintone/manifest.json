@@ -1,0 +1,131 @@
+{
+ "fetchedAt": "2026-09-10T21:52:10.526Z",
+ "domain": "zrqf50naoiwx.cybozu.com",
+ "note": "kintone REST API customize.json / file.json から取得。KintoneRestAPIClient.min.js（ライブラリ）は保存対象外",
+ "files": [
+  {
+   "app": "32",
+   "appName": "Z_売上（発送）",
+   "scope": "desktop",
+   "type": "js",
+   "name": "kintone-backup-loader-32.js",
+   "size": "711",
+   "path": "JS/kintone/032_Z_売上（発送）/kintone-backup-loader-32.js"
+  },
+  {
+   "app": "33",
+   "appName": "セール設定アプリ",
+   "scope": "desktop",
+   "type": "js",
+   "name": "main.js",
+   "size": "47699",
+   "path": "JS/kintone/033_セール設定アプリ/main.js"
+  },
+  {
+   "app": "45",
+   "appName": "取引先別売上精算書出力",
+   "scope": "desktop",
+   "type": "js",
+   "name": "main.js",
+   "size": "48985",
+   "path": "JS/kintone/045_取引先別売上精算書出力/main.js"
+  },
+  {
+   "app": "45",
+   "appName": "取引先別売上精算書出力",
+   "scope": "desktop",
+   "type": "js",
+   "name": "list_field_color.js",
+   "size": "2028",
+   "path": "JS/kintone/045_取引先別売上精算書出力/list_field_color.js"
+  },
+  {
+   "app": "56",
+   "appName": "ZOZO子カテゴリマスタ",
+   "scope": "desktop",
+   "type": "js",
+   "name": "一括削除.js",
+   "size": "2530",
+   "path": "JS/kintone/056_ZOZO子カテゴリマスタ/一括削除.js"
+  },
+  {
+   "app": "61",
+   "appName": "親カテゴリマスタ",
+   "scope": "desktop",
+   "type": "js",
+   "name": "kmailer-61.js",
+   "size": "2863",
+   "path": "JS/kintone/061_親カテゴリマスタ/kmailer-61.js"
+  },
+  {
+   "app": "62",
+   "appName": "フォロー業務",
+   "scope": "desktop",
+   "type": "js",
+   "name": "main.js",
+   "size": "23502",
+   "path": "JS/kintone/062_フォロー業務/main.js"
+  },
+  {
+   "app": "69",
+   "appName": "旭川在庫管理",
+   "scope": "desktop",
+   "type": "js",
+   "name": "main.js",
+   "size": "12023",
+   "path": "JS/kintone/069_旭川在庫管理/main.js"
+  },
+  {
+   "app": "82",
+   "appName": "売上報告",
+   "scope": "desktop",
+   "type": "js",
+   "name": "KintoneRestAPIClient.min.js",
+   "size": "241518",
+   "skipped": "library"
+  },
+  {
+   "app": "82",
+   "appName": "売上報告",
+   "scope": "desktop",
+   "type": "js",
+   "url": "https://apis.google.com/js/api.js"
+  },
+  {
+   "app": "82",
+   "appName": "売上報告",
+   "scope": "desktop",
+   "type": "js",
+   "name": "main.js",
+   "size": "123",
+   "path": "JS/kintone/082_売上報告/main.js"
+  },
+  {
+   "app": "86",
+   "appName": "返却業務",
+   "scope": "desktop",
+   "type": "js",
+   "name": "main.js",
+   "size": "8005",
+   "path": "JS/kintone/086_返却業務/main.js"
+  },
+  {
+   "app": "89",
+   "appName": "親カテゴリマスタ-本番",
+   "scope": "desktop",
+   "type": "js",
+   "name": "kmailer-61.js",
+   "size": "2863",
+   "path": "JS/kintone/089_親カテゴリマスタ-本番/kmailer-61.js"
+  },
+  {
+   "app": "91",
+   "appName": "メール配信",
+   "scope": "desktop",
+   "type": "js",
+   "name": "mail_main_pulldown.js",
+   "size": "12477",
+   "path": "JS/kintone/091_メール配信/mail_main_pulldown.js"
+  }
+ ]
+}
