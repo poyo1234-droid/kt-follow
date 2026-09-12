@@ -18,7 +18,14 @@ import io
 import os
 import sys
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+def use_utf8_stdout():
+    """Windowsのコンソールで日本語が化けないようにする。二重に掛けない。"""
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    if enc.replace("-", "") != "utf8":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+
+use_utf8_stdout()
 
 from playwright.sync_api import sync_playwright
 
