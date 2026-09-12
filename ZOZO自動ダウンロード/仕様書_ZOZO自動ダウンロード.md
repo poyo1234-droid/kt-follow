@@ -77,8 +77,8 @@ Transfer-Encoding: chunked
 
 **chunked なので、データの最後に「サイズ0の終端チャンク」が来る。** これがプロトコル上の
 完了信号になる。途中で接続が切れた場合、Python の `http.client` は終端チャンクが
-来ないことを検知して `IncompleteRead` を投げるはず（**未検証**。意図的に接続を切る
-テストで確かめる価値がある）。
+来ないことを検知して **`IncompleteRead` を投げる（`test_truncated.py` で検証済み）**。
+このとき書きかけのファイルは残らない。
 
 ただし、ZOZO側が途中までを正常なデータとして終端チャンクを送ってきた場合は
 プロトコル上は正常完了に見える。これを捕まえるのが §3 の自前検査。
@@ -191,6 +191,16 @@ ZOZO画面に件数表示が無く、`Content-Length` も返らないため、
 そのため「最終行の列数」ではなく、**末尾が改行で終わっているか**と
 **最終行の引用符が閉じているか**を見る方式にした。
 
+### 完了判定は3層（2026-09-13 すべて検証済み）
+
+| 層 | 何を見るか | 検証結果 |
+|---|---|---|
+| 1 | HTTPの終端チャンク | 途中で切れると `IncompleteRead`。書きかけのファイルは残らない |
+| 2 | `Content-Type` が csv / excel か | HTMLが返ると `RuntimeError` で弾く |
+| 3 | 自前の検査（下表） | 6ケースで確認 |
+
+`test_truncated.py` を実行すれば1層目と2層目をいつでも再確認できる。
+
 ### 検査の動作確認（2026-09-13）
 
 実データの先頭2MBから異常系のファイルを作り、6ケースすべてで期待どおりに動くことを確認済み。
@@ -230,6 +240,7 @@ ZOZO画面に件数表示が無く、`Content-Length` も返らないため、
 | ファイル | 役割 |
 |---|---|
 | `zozo_download.py` | **本番。これを毎朝実行する** |
+| `zozo_download.bat` | タスクスケジューラから呼ぶ起動バッチ。パスに日本語が含まれるため `%~dp0` を使い、中身はASCIIのみ |
 | `settings.txt` | 企業ID/PW・個人ID/PW・保存先。**.gitignore 済み** |
 | `settings.txt.sample` | 記入例。これをコピーして `settings.txt` を作る |
 | `log/` | 実行ログ。**.gitignore 済み** |
@@ -239,19 +250,53 @@ ZOZO画面に件数表示が無く、`Content-Length` も返らないため、
 | `probe_result.py` | 調査用。検索結果画面のボタン・リンクを出す |
 | `probe_download.py` | 検証用（方式1・ブラウザ経由）。採用しない |
 | `probe_download2.py` | 検証用（方式2・直接受信）。本番はこの方式 |
+| `test_truncated.py` | 受信が途中で切れたときに気づけるかのテスト。ローカルにサーバを立てて確かめる（ZOZOには接続しない） |
 
 `settings.txt` は `削除ツール/kintone_delete.py`（kt リポジトリ）と同じ `key=value` 形式。
 **値をクォートで囲まないこと。**
 
 ---
 
-## 5. 残っている作業
+## 5. タスクスケジューラ（登録済み・2026-09-13）
 
-1. タスクスケジューラに登録（毎朝8時）
+| 項目 | 値 |
+|---|---|
+| タスク名 | `ZOZO_goods_cs_download` |
+| 実行するもの | `ZOZO自動ダウンロード\zozo_download.bat` |
+| スケジュール | 毎日 8:00 |
+| 実行ユーザー | `poyo`（**Interactive = ログオン中のみ動く**。失敗時のメッセージボックスを見せるため） |
+| 実行時間の上限 | 2時間（通常20分。超えたら打ち切る） |
+| 取りこぼし時 | `StartWhenAvailable` = 有効（PCが止まっていた場合、起動後に実行する） |
+| 多重起動 | しない（前回が動いていたら新しい方を捨てる） |
+| バッテリー条件 | 無効化済み（既定では電源がバッテリーだと動かないため） |
+
+### 確認のしかた
+
+画面から: `Win + R` → `taskschd.msc` → 「タスク スケジューラ ライブラリ」→ `ZOZO_goods_cs_download`
+
+コマンドから:
+
+```
+powershell -Command "Get-ScheduledTaskInfo -TaskName 'ZOZO_goods_cs_download' | Format-List"
+```
+
+`LastTaskResult` が `0` なら成功。`0` 以外なら `log\zozo_download_YYYYMMDD.log` を見る。
+
+### 手で今すぐ動かす
+
+```
+powershell -Command "Start-ScheduledTask -TaskName 'ZOZO_goods_cs_download'"
+```
+
+約20分かかり、約1GBを受信する。
+
+## 6. 残っている作業
+
+- 初回の自動実行（2026-09-14 8:00）の結果確認。前回比較が初めて働く回になる
 
 ---
 
-## 6. 注意
+## 7. 注意
 
 - **多要素認証（MFA）の導入予定がある。** BACK OFFICE のお知らせに
   「【管理画面】多要素認証（MFA）導入のご案内」（2026-09-02付）がある。
