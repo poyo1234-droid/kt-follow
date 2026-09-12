@@ -300,15 +300,28 @@ def inspect(path, prev_path, log):
         log("  ヘッダは以前と同じです")
 
     # --- 2. 途中切れ ---
-    last = read_last_line(path)
-    last_cols = last.count(",") + 1 if last else 0
-    log("  最終行の列数: %d" % last_cols)
-    if last_cols < len(cols):
-        # 商品コメントの改行で最終行が途中になることもあるが、
-        # 大きく足りない場合は受信が切れている
-        log.error("最終行の列数（%d）がヘッダ（%d）より少ないため、"
-                  "受信が途中で切れた可能性があります。" % (last_cols, len(cols)))
+    # 列数はカンマを数えるだけでは判定できない。商品コメント列にHTMLが入っており、
+    # 引用符の中にカンマも改行も含まれるため。代わりに次の2つを見る。
+    #   ・ファイルが改行で終わっているか（途中で切れれば行の途中で止まる）
+    #   ・最終行の引用符が閉じているか（ダブルクォートが偶数か）
+    with io.open(path, "rb") as f:
+        f.seek(-2, 2)
+        tail2 = f.read()
+    if not tail2.endswith(b"\n"):
+        log.error("ファイルが改行で終わっていません（末尾: %r）。"
+                  "受信が途中で切れた可能性があります。" % tail2)
         ok = False
+    else:
+        log("  ファイルは改行で終わっています")
+
+    last = read_last_line(path)
+    quotes = last.count('"')
+    if quotes % 2 != 0:
+        log.error("最終行の引用符が閉じていません（\" が %d 個で奇数）。"
+                  "受信が途中で切れた可能性があります。" % quotes)
+        ok = False
+    else:
+        log("  最終行の引用符は閉じています（\" が %d 個）" % quotes)
 
     # --- 3. 前回との比較 ---
     lines = count_lines(path)
@@ -319,16 +332,24 @@ def inspect(path, prev_path, log):
         prev_lines = count_lines(prev_path)
         log("  前回: %.1f MB / %s 行"
             % (prev_size / 1048576.0, "{:,}".format(prev_lines)))
+        # 増えるぶんには止めない。ダウンロードが途中で切れたときにファイルが
+        # 増えることはあり得ず、商品の大量追加で増えるのは正常な動きのため。
+        # 欠損は必ず「減る」方向に出るので、減少だけを中断の対象にする。
         for name, now, before in (("サイズ", size, prev_size),
                                   ("行数", lines, prev_lines)):
             if before == 0:
                 continue
             ratio = (now - before) / float(before)
             log("    %s の増減: %+.1f%%" % (name, ratio * 100))
-            if abs(ratio) > TOLERANCE:
-                log.error("%s が前回比 %+.1f%% で、許容幅 ±%.0f%% を超えています。"
+            if ratio < -TOLERANCE:
+                log.error("%s が前回比 %+.1f%% で、%.0f%% 以上減っています。"
+                          "受信が途中で切れた可能性があります。"
                           % (name, ratio * 100, TOLERANCE * 100))
                 ok = False
+            elif ratio > TOLERANCE:
+                log("    ※ %s が前回比 %+.1f%% と大きく増えています"
+                    "（商品の大量追加と思われます。中断はしません）"
+                    % (name, ratio * 100))
     else:
         log("  前回ファイルが無いため、比較は行いません（初回とみなします）")
 
