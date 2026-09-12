@@ -8,6 +8,8 @@ ZOZO BACK OFFICE ログイン画面 調査用スクリプト（第2段階）
 
   python probe_login.py          画面を見ずに実行
   python probe_login.py --show   ブラウザを表示して実行（動きを目で確認したいとき）
+  python probe_login.py --show --keep
+                                 ブラウザを開いたまま止める（Enterを押すまで閉じない）
 
 出力にパスワードは一切含まれません。出力をそのまま貼り付けて構いません。
 """
@@ -95,6 +97,8 @@ def dump_page(pg, label):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--show", action="store_true", help="ブラウザを表示する")
+    ap.add_argument("--keep", action="store_true",
+                    help="Enterを押すまでブラウザを閉じずに待つ")
     args = ap.parse_args()
 
     s = load_settings()
@@ -129,6 +133,15 @@ def main():
         with io.open(html, "w", encoding="utf-8") as f:
             f.write(pg.content())
         print("HTML: %s" % html)
+
+        if args.keep:
+            print("")
+            print("ブラウザを開いたままにしています。"
+                  "確認が終わったら、この画面で Enter を押してください。")
+            try:
+                input()
+            except EOFError:
+                pass
 
         browser.close()
 
