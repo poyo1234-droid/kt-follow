@@ -17,3 +17,8 @@ desktop.ini
 # kintone から取得した生データ（config.js のトークン入り）・誤出力の退避先
 JS/kintone/kintone_*_js_*.json
 JS/_to_delete_*/
+
+# ZOZO自動ダウンロード（ID/PW・調査ログ・ダウンロードしたCSV）
+ZOZO自動ダウンロード/settings.txt
+ZOZO自動ダウンロード/log/
+ZOZO自動ダウンロード/*.csv
