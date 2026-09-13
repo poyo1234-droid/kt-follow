@@ -22,3 +22,6 @@ JS/_to_delete_*/
 ZOZO自動ダウンロード/settings.txt
 ZOZO自動ダウンロード/log/
 ZOZO自動ダウンロード/*.csv
+
+# ZOZO から落とした goods_cs.csv（約970MB）と退避分。巨大なため追跡しない
+zozo/
