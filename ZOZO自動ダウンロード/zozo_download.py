@@ -2,33 +2,43 @@
 """
 ZOZO BACK OFFICE 展開単位CSV（goods_cs.csv）自動ダウンロード
 
-毎朝タスクスケジューラから実行する。約970MB・約40万行を15分ほどかけて取得し、
-検査に通ったときだけ旧ファイルを OLD へ退避して入れ替える。
+毎朝タスクスケジューラから実行する。約970MB・約40万行を、登録日で7つに分けて
+順に受信し、結合してから検査する。検査に通ったときだけ旧ファイルを OLD へ
+退避して入れ替える。
 
   python zozo_download.py              通常の実行
   python zozo_download.py --show       ブラウザを表示して実行（動作確認用）
   python zozo_download.py --dry-run    受信だけして入れ替えない（検査結果は出す）
-  python zozo_download.py --no-popup   失敗してもメッセージボックスを出さない
 
 設定は settings.txt（このファイルと同じフォルダ）。値をクォートで囲まないこと。
 
 --------------------------------------------------------------------------
+なぜ分割するのか（2026-09-14）
+--------------------------------------------------------------------------
+1本で落とすと ZOZO 側の ASP が約30分で自らタイムアウトし（ASP 0113）、
+途中までのデータにエラーページを足して正常終了してしまう。970MB を30分で
+落とすには 0.54MB/s 以上が必要だが、実測は 0.45〜1.1MB/s とぶれる。
+登録日で7分割すれば1本あたり150MB以下・5分程度になり、速度が半減しても収まる。
+詳細は 仕様書_ZOZO自動ダウンロード.md の §1.7〜§2。
+
+--------------------------------------------------------------------------
 処理の流れ
 --------------------------------------------------------------------------
- 1. Playwright で Basic認証（1段目）とログインフォーム（2段目）を通す
- 2. 商品検索を開いて検索ボタンを押す（条件は既定のまま。表示件数はCSVに影響しない）
- 3. セッションのCookieを取り出してブラウザを閉じる
- 4. Cookie と Basic認証ヘッダを付けて CSV を直接ストリーミング受信し、
-    保存先フォルダに一時名（.part）で書く
- 5. 検査する
-      - ヘッダの列数が28か（違えば中断）
-      - 列名が既知と一致するか（違えば警告のみ。ZOZO側で表記が変わる前例があるため）
-      - 最終行の列数が揃っているか（途中切れの検出）
-      - 前回ファイルと行数・サイズを比べて ±10% 以内か
- 6. 通ったら、旧ファイルを OLD へ移し、.part を正式名にする
-    通らなかったら .part を失敗フォルダに残し、旧ファイルはそのままにする
+ 1. Playwright で Basic認証（1段目）とログインフォーム（2段目）を通す（1回だけ）
+ 2. チャンクごとに、商品検索を開いて登録日の範囲を入れて検索する
+ 3. そのときのCookieで CSV を直接ストリーミング受信し、.partNN に書く
+ 4. チャンクを検査する
+      - 末尾に ASP 0113（ZOZO側のタイムアウト）が混ざっていないか
+      - 改行で終わっているか / ヘッダ28列か / 0件でないか
+      - 登録日が指定した範囲に収まっているか
+    通らなければそのチャンクだけ再取得（最大2回・30秒あけて）
+ 5. 全チャンクが揃ったら、ヘッダ1つ・CP932のままバイト連結して .part を作る
+ 6. 結合後に前回ファイルと行数・サイズを比べる（-10%で中断）
+ 7. 通ったら、旧ファイルを OLD へ移し、.part を正式名にする
+    通らなかったら .part を失敗の名前で残し、旧ファイルはそのままにする
 
-ログは log フォルダの zozo_download_YYYYMMDD.log に追記する。
+**1本でも欠けたら結合も入れ替えもしない。**
+通知はログのみ（log/zozo_download_YYYYMMDD.log に追記）。
 """
 import argparse
 import io
@@ -39,7 +49,8 @@ import time
 import base64
 import urllib.request
 import urllib.error
-from datetime import datetime
+import csv
+from datetime import datetime, timedelta
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(SCRIPT_DIR, "log")
@@ -68,6 +79,14 @@ ENCODING = "cp932"        # ZOZOのCSVは Shift-JIS
 CHUNK = 1024 * 1024       # 1MBずつ受信する
 HTTP_TIMEOUT = 180        # 無通信がこの秒数続いたら諦める
 
+# --- 分割（2026-09-14 追加）---
+FIRST_START = "2000/01/01"   # 先頭チャンクの始端。最古の登録日(2017/09)より前なら何でもよい
+RETRY_MAX = 2                # チャンク1本あたりの再取得回数
+RETRY_WAIT = 30              # 再取得までに待つ秒数
+CHUNK_WARN_MB = 120          # 最終チャンクがこれを超えたら境界追加を促す
+CHUNK_WARN_ROWS = 80000      # 同上（件数）
+csv.field_size_limit(10 ** 9)   # 商品コメントが巨大なため
+
 
 # ----------------------------------------------------------------- ログ
 
@@ -91,15 +110,6 @@ class Logger(object):
 
     def close(self):
         self.f.close()
-
-
-def popup(title, text):
-    """失敗をその場で気づけるようにメッセージボックスを出す。"""
-    try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)   # MB_ICONERROR
-    except Exception:
-        pass
 
 
 # ----------------------------------------------------------------- 設定
@@ -136,69 +146,151 @@ def load_settings():
 
 # ----------------------------------------------------------------- 取得
 
-def fetch_cookies(s, log, show=False):
-    """Playwright でログインと検索を済ませ、セッションのCookieを返す。"""
-    from playwright.sync_api import sync_playwright
+def build_ranges(s, log):
+    """settings.txt の chunk_boundaries から (開始日, 終了日) の並びを作る。
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not show)
-        ctx = browser.new_context(
+    chunk_boundaries には各チャンクの「終了日」をカンマ区切りで書く。
+    最終チャンクの終了日は実行日を使うので書かない（境界6つ → 7チャンク）。
+    """
+    raw = s.get("chunk_boundaries", "").strip()
+    if not raw:
+        raise RuntimeError(
+            "settings.txt に chunk_boundaries がありません。"
+            "settings.txt.sample を参照してください。")
+    bounds = [x.strip() for x in raw.split(",") if x.strip()]
+    try:
+        ds = [datetime.strptime(b, "%Y/%m/%d") for b in bounds]
+    except ValueError as e:
+        raise RuntimeError("chunk_boundaries の日付は YYYY/MM/DD で書いてください: %s" % e)
+    for a, b in zip(ds, ds[1:]):
+        if b <= a:
+            raise RuntimeError("chunk_boundaries が昇順になっていません: %s" % raw)
+
+    today = datetime.now()
+    if ds and ds[-1].date() >= today.date():
+        raise RuntimeError(
+            "chunk_boundaries の最後（%s）が今日以降です。"
+            "最終チャンクの終了日は書かないでください。" % bounds[-1])
+
+    ranges = []
+    start = FIRST_START
+    for d in ds:
+        ranges.append((start, d.strftime("%Y/%m/%d")))
+        start = (d + timedelta(days=1)).strftime("%Y/%m/%d")
+    ranges.append((start, today.strftime("%Y/%m/%d")))
+
+    log("チャンクは %d本です（最終チャンクの終端は実行日）" % len(ranges))
+    for i, (a, b) in enumerate(ranges, 1):
+        log("  %d: 登録日 %s 〜 %s" % (i, a, b))
+    return ranges
+
+
+class Session(object):
+    """ログインしたブラウザを保持し、チャンクごとに検索し直す。
+
+    CSVのURL（c=ListDownLoadCS）はパラメータを持たず、条件はサーバー側の
+    セッションに保持される。そのため「検索フォームを送信 → 同じURLをGET」の
+    順でしか絞れず、並列取得もできない（条件が1つしかないため）。
+    """
+
+    def __init__(self, s, log, show=False):
+        self.s = s
+        self.log = log
+        self.show = show
+        self._pw = None
+        self._browser = None
+        self.ctx = None
+        self.pg = None
+
+    def open(self):
+        from playwright.sync_api import sync_playwright
+        s, log = self.s, self.log
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(headless=not self.show)
+        self.ctx = self._browser.new_context(
             http_credentials={"username": s["company_id"],
                               "password": s["company_password"]},
             user_agent=CHROME_UA,
         )
-        pg = ctx.new_page()
+        pg = self.ctx.new_page()
         pg.set_default_timeout(120000)
         pg.on("dialog", lambda d: (log("  画面のダイアログ: %s" % d.message),
                                    d.accept()))
+
+        resp = pg.goto(TOP_URL, wait_until="domcontentloaded", timeout=60000)
+        if resp is not None and resp.status == 401:
+            raise RuntimeError(
+                "1段目(Basic認証)が通りませんでした。"
+                "settings.txt の company_id / company_password を確認してください。")
+        log("1段目(Basic認証)を通過しました")
+
+        pg.wait_for_selector("#UserID", timeout=30000)
+        pg.fill("#UserID", s["user_id"])
+        pg.fill("input[name='Password']", s["user_password"])
+        with pg.expect_navigation(wait_until="domcontentloaded", timeout=60000):
+            pg.click("button[type='submit']")
+        pg.wait_for_timeout(2000)
+        if pg.query_selector("#UserID") is not None:
+            raise RuntimeError(
+                "2段目のログインに失敗しました。"
+                "settings.txt の user_id / user_password を確認してください。")
+        log("2段目(ログイン)を通過しました")
+
+        # パスワードの強制変更が掛かると自動化は止まる。気づけるように見ておく
+        el = pg.query_selector("input[placeholder='旧パスワード']")
+        if el is not None and el.is_visible():
+            raise RuntimeError(
+                "パスワード変更の画面が表示されています。"
+                "手動でパスワードを変更してから、再度実行してください。")
+        self.pg = pg
+
+    def search(self, dfrom, dto):
+        """登録日の範囲で検索し、そのときのCookieを返す。"""
+        pg, log = self.pg, self.log
+        pg.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
+        pg.wait_for_selector("button[name='search']", timeout=30000)
+
+        # ラジオ・チェックはCSSで隠れているので JS で触る。
+        # 日付は fill のあと Escape を押すとピッカーが値を戻してしまうため、
+        # JS で値を入れて change を発火させる（2026-09-14 実測）。
+        pg.eval_on_selector("input[name='SEARCH_RegistDT']", "e => { e.checked = true; }")
+        setter = ("(e, v) => { e.value = v;"
+                  " e.dispatchEvent(new Event('input', {bubbles:true}));"
+                  " e.dispatchEvent(new Event('change', {bubbles:true})); }")
+        want = (("RegistDTFrom", dfrom), ("RegistDTTo", dto))
+        for name, v in want:
+            pg.eval_on_selector("input[name='%s']" % name, setter, v)
+
+        # 送信直前に読み戻して照合する。空のまま検索すると0件になる
+        for name, v in want:
+            el = pg.query_selector("input[name='%s']" % name)
+            got = el.input_value() if el is not None else None
+            if got != v:
+                raise RuntimeError("検索条件 %s が %r になっていません（実値 %r）。"
+                                   % (name, v, got))
+        chk = pg.query_selector("input[name='SEARCH_RegistDT']")
+        if chk is None or not chk.is_checked():
+            raise RuntimeError("登録日での絞り込みが有効になっていません。")
+
+        t0 = time.time()
+        with pg.expect_navigation(wait_until="domcontentloaded", timeout=600000):
+            pg.click("button[name='search']")
+        log("  検索完了まで %.1f秒" % (time.time() - t0))
+
+        if pg.query_selector("a[href*='c=ListDownLoadCS']") is None:
+            raise RuntimeError("検索結果に「展開単位CSV」が見つかりませんでした。"
+                               "該当0件か、画面の作りが変わった可能性があります。")
+
+        cookies = self.ctx.cookies()
+        return "; ".join("%s=%s" % (c["name"], c["value"]) for c in cookies)
+
+    def close(self):
         try:
-            resp = pg.goto(TOP_URL, wait_until="domcontentloaded", timeout=60000)
-            status = resp.status if resp else None
-            if status == 401:
-                raise RuntimeError(
-                    "1段目(Basic認証)が通りませんでした。"
-                    "settings.txt の company_id / company_password を確認してください。")
-            log("1段目(Basic認証)を通過しました")
-
-            pg.wait_for_selector("#UserID", timeout=30000)
-            pg.fill("#UserID", s["user_id"])
-            pg.fill("input[name='Password']", s["user_password"])
-            with pg.expect_navigation(wait_until="domcontentloaded", timeout=60000):
-                pg.click("button[type='submit']")
-            pg.wait_for_timeout(2000)
-            if pg.query_selector("#UserID") is not None:
-                raise RuntimeError(
-                    "2段目のログインに失敗しました。"
-                    "settings.txt の user_id / user_password を確認してください。")
-            log("2段目(ログイン)を通過しました")
-
-            # パスワードの強制変更が掛かると自動化は止まる。気づけるように見ておく
-            el = pg.query_selector("input[placeholder='旧パスワード']")
-            if el is not None and el.is_visible():
-                raise RuntimeError(
-                    "パスワード変更の画面が表示されています。"
-                    "手動でパスワードを変更してから、再度実行してください。")
-
-            log("商品検索を開きます")
-            pg.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
-            pg.wait_for_selector("button[name='search']", timeout=30000)
-
-            # 検索条件は既定のまま。表示件数(Top)はCSVの中身に影響しない
-            log("検索します（条件は既定のまま）")
-            t0 = time.time()
-            with pg.expect_navigation(wait_until="domcontentloaded", timeout=600000):
-                pg.click("button[name='search']")
-            log("  検索完了まで %.1f秒" % (time.time() - t0))
-
-            if pg.query_selector("a[href*='c=ListDownLoadCS']") is None:
-                raise RuntimeError("検索結果に「展開単位CSV」が見つかりませんでした。"
-                                   "画面の作りが変わった可能性があります。")
-
-            cookies = ctx.cookies()
-            log("セッションのCookieを取り出しました（%d個）" % len(cookies))
-            return "; ".join("%s=%s" % (c["name"], c["value"]) for c in cookies)
+            if self._browser is not None:
+                self._browser.close()
         finally:
-            browser.close()
+            if self._pw is not None:
+                self._pw.stop()
 
 
 def download(cookie_header, s, out_path, log):
@@ -262,6 +354,144 @@ def read_last_line(path, enc=ENCODING):
     if not lines:
         return ""
     return lines[-1].decode(enc, "replace").rstrip("\r")
+
+
+def scan_chunk(path):
+    """チャンクを1回読んで、データ行数と登録日の最小・最大を返す。"""
+    rows = 0
+    dmin = None
+    dmax = None
+    with io.open(path, encoding=ENCODING, errors="replace", newline="") as f:
+        r = csv.reader(f)
+        try:
+            hdr = next(r)
+        except StopIteration:
+            return 0, None, None
+        try:
+            ir = hdr.index("登録日")
+        except ValueError:
+            ir = None
+        for row in r:
+            if len(row) < EXPECTED_COLUMN_COUNT:
+                continue
+            rows += 1
+            if ir is None:
+                continue
+            d = row[ir][:10]
+            if not d:
+                continue
+            if dmin is None or d < dmin:
+                dmin = d
+            if dmax is None or d > dmax:
+                dmax = d
+    return rows, dmin, dmax
+
+
+def inspect_chunk(path, dfrom, dto, is_last, log):
+    """チャンク1本の検査。(通ったか, 再取得で直りそうか) を返す。"""
+    size = os.path.getsize(path)
+    log("  検査します（%.1f MB）" % (size / 1048576.0))
+
+    if size == 0:
+        log.error("チャンクが空です。")
+        return False, True
+
+    with io.open(path, "rb") as f:
+        f.seek(max(0, size - 4096))
+        tail = f.read()
+
+    # C1: ZOZO側のスクリプトタイムアウト。行数を数える前にここで捕まえる
+    if b"ASP 0113" in tail or b"Active Server Pages" in tail:
+        log.error("末尾に ZOZO のエラーページ（ASP 0113・スクリプトタイムアウト）が"
+                  "混ざっています。このチャンクが大きすぎる可能性があります。"
+                  "settings.txt の chunk_boundaries で分割を細かくしてください。")
+        return False, True
+
+    # C2: 途中切れ
+    if not tail.endswith(b"\n"):
+        log.error("チャンクが改行で終わっていません（末尾: %r）。"
+                  "受信が途中で切れた可能性があります。" % tail[-20:])
+        return False, True
+
+    # C3: ヘッダ。ZOZO側の仕様変更なので再取得しても直らない
+    try:
+        with io.open(path, encoding=ENCODING, newline="") as f:
+            header = f.readline().rstrip("\r\n")
+    except UnicodeDecodeError as e:
+        log.error("%s として読めませんでした: %s" % (ENCODING, e))
+        return False, True
+    cols = header.split(",")
+    if len(cols) != EXPECTED_COLUMN_COUNT:
+        log.error("ヘッダの列数が %d ではなく %d です。"
+                  "ZOZO側の仕様変更の可能性があります。"
+                  % (EXPECTED_COLUMN_COUNT, len(cols)))
+        return False, False
+
+    # C4/C5: 中身
+    rows, dmin, dmax = scan_chunk(path)
+    log("    %s行 / 登録日 %s 〜 %s" % ("{:,}".format(rows), dmin, dmax))
+
+    if rows == 0:
+        log.error("チャンクが0件です。検索条件が正しく入っていない可能性があります。")
+        return False, True
+
+    if dmin is not None and (dmin < dfrom or dmax > dto):
+        log.error("登録日が指定範囲（%s 〜 %s）の外にあります（実際は %s 〜 %s）。"
+                  "検索条件が効いていない可能性があります。"
+                  % (dfrom, dto, dmin, dmax))
+        return False, False
+
+    # 最終チャンクは毎日伸びる。上限に当たる前に知らせる
+    if is_last and (size > CHUNK_WARN_MB * 1048576 or rows > CHUNK_WARN_ROWS):
+        log("  ※ 最終チャンクが %.0f MB / %s行 になりました。"
+            "settings.txt の chunk_boundaries に境界を1つ足してください"
+            % (size / 1048576.0, "{:,}".format(rows)))
+
+    return True, True
+
+
+def fetch_chunk(sess, s, idx, total, dfrom, dto, path, log):
+    """チャンク1本を取得する。駄目なら再取得する。"""
+    mark = len(log.errors)
+    for attempt in range(1, RETRY_MAX + 2):
+        if attempt > 1:
+            log("  %d秒あけて再取得します（%d回目）" % (RETRY_WAIT, attempt))
+            time.sleep(RETRY_WAIT)
+        log("チャンク %d/%d  登録日 %s 〜 %s" % (idx, total, dfrom, dto))
+        cookie_header = sess.search(dfrom, dto)
+        download(cookie_header, s, path, log)
+        ok, retryable = inspect_chunk(path, dfrom, dto, idx == total, log)
+        if ok:
+            del log.errors[mark:]     # 再取得で直ったぶんは最終報告に出さない
+            return
+        if not retryable:
+            raise RuntimeError("チャンク %d は再取得しても直らない問題です。" % idx)
+        if os.path.exists(path):
+            os.remove(path)
+    raise RuntimeError("チャンク %d の取得に %d 回失敗しました。"
+                       % (idx, RETRY_MAX + 1))
+
+
+def merge(parts, out_path, log):
+    """ヘッダ1つ・CP932のままバイト連結する。デコードはしない。"""
+    t0 = time.time()
+    with io.open(out_path, "wb") as out:
+        for i, p in enumerate(parts):
+            with io.open(p, "rb") as f:
+                if i > 0:
+                    # 2本目以降はヘッダ行を捨てる。ヘッダは列名だけなので
+                    # 最初の改行までを読み飛ばせばよい
+                    while True:
+                        b = f.read(1)
+                        if not b or b == b"\n":
+                            break
+                while True:
+                    buf = f.read(CHUNK)
+                    if not buf:
+                        break
+                    out.write(buf)
+    log("  結合しました %.1f MB（%.1f秒）"
+        % (os.path.getsize(out_path) / 1048576.0, time.time() - t0))
 
 
 def inspect(path, prev_path, log):
@@ -379,8 +609,6 @@ def main():
     ap.add_argument("--show", action="store_true", help="ブラウザを表示する")
     ap.add_argument("--dry-run", action="store_true",
                     help="受信と検査だけ行い、ファイルの入れ替えはしない")
-    ap.add_argument("--no-popup", action="store_true",
-                    help="失敗してもメッセージボックスを出さない")
     args = ap.parse_args()
 
     log = Logger()
@@ -388,6 +616,7 @@ def main():
     log("ZOZO goods_cs 自動ダウンロードを開始します")
 
     tmp_path = None
+    parts = []
     try:
         s = load_settings()
         out_dir = s["download_dir"]
@@ -397,14 +626,35 @@ def main():
             raise RuntimeError("保存先フォルダがありません: %s" % out_dir)
         log("保存先: %s" % final_path)
 
+        ranges = build_ranges(s, log)
+
+        # 前回の残骸を消す。結合時に一時的に約2GB使うため
         tmp_path = final_path + ".part"
+        for n in range(1, len(ranges) + 1):
+            stale = "%s.part%02d" % (final_path, n)
+            if os.path.exists(stale):
+                os.remove(stale)
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-        cookie_header = fetch_cookies(s, log, show=args.show)
+        t0 = time.time()
+        sess = Session(s, log, show=args.show)
+        sess.open()
+        try:
+            for idx, (dfrom, dto) in enumerate(ranges, 1):
+                path = "%s.part%02d" % (final_path, idx)
+                fetch_chunk(sess, s, idx, len(ranges), dfrom, dto, path, log)
+                parts.append(path)
+        finally:
+            sess.close()
+        log("全 %d チャンクを受信しました（%.1f分）"
+            % (len(parts), (time.time() - t0) / 60.0))
 
-        log("CSVを受信します（約970MB・15分ほどかかります）")
-        download(cookie_header, s, tmp_path, log)
+        log("結合します（ヘッダ1つ・CP932のまま連結）")
+        merge(parts, tmp_path, log)
+        for path in parts:
+            os.remove(path)
+        parts = []
 
         ok = inspect(tmp_path, final_path, log)
 
@@ -433,12 +683,17 @@ def main():
     except Exception as e:
         log.error(str(e))
         log("異常終了しました")
-        if not args.no_popup:
-            popup("ZOZO goods_cs ダウンロード失敗",
-                  "%s\n\nログ: %s" % (e, log.path))
+        log("  ログ: %s" % log.path)
         return 1
     finally:
-        # 途中で落ちた場合、書きかけの .part は残さない
+        # 途中で落ちた場合、書きかけのファイルは残さない。
+        # ただし失敗したチャンクは原因調査のために残す
+        for path in parts:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
