@@ -76,17 +76,24 @@ def login_and_search(s, conds, label):
             if conds.get("RegistDTFrom"):
                 pg.eval_on_selector("input[name='SEARCH_RegistDT']",
                                     "e => { e.checked = true; }")
-                pg.fill("input[name='RegistDTFrom']", conds["RegistDTFrom"])
-                pg.fill("input[name='RegistDTTo']", conds["RegistDTTo"])
-                pg.keyboard.press("Escape")   # 日付ピッカーを閉じる
+                # fill + Escape だと日付ピッカーが値を戻す（2026-09-14 実測）。
+                # JS で直接入れて change を発火させる
+                setter = ("(e, v) => { e.value = v;"
+                          " e.dispatchEvent(new Event('input', {bubbles:true}));"
+                          " e.dispatchEvent(new Event('change', {bubbles:true})); }")
+                for nm in ("RegistDTFrom", "RegistDTTo"):
+                    pg.eval_on_selector("input[name='%s']" % nm, setter, conds[nm])
 
             # 送信直前の実値を記録（ピッカーに書き換えられていないか確認する）
             for name in ("GoodsCode", "RegistDTFrom", "RegistDTTo"):
                 el = pg.query_selector("input[name='%s']" % name)
-                if el is not None:
-                    v = el.input_value()
-                    if v:
-                        log("    送信値 %s = %r" % (name, v))
+                v = el.input_value() if el is not None else None
+                log("    送信値 %s = %r" % (name, v))
+                want = conds.get(name)
+                if want and v != want:
+                    raise RuntimeError(
+                        "条件 %s が %r になっていません（実値 %r）。"
+                        "検索する前に中止しました。" % (name, want, v))
             chk = pg.query_selector("input[name='SEARCH_RegistDT']")
             if chk is not None:
                 log("    送信値 SEARCH_RegistDT(checked) = %s" % chk.is_checked())
