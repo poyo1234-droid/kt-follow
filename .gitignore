@@ -25,3 +25,6 @@ ZOZO自動ダウンロード/*.csv
 
 # ZOZO から落とした goods_cs.csv（約970MB）と退避分。巨大なため追跡しない
 zozo/
+
+# ZOZO から配布された MFA 資料（CONFIDENTIAL 表記。中身は仕様書 §7-1 に要約済み）
+ZOZO自動ダウンロード/*.pdf
